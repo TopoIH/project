@@ -7,7 +7,7 @@ export async function fetchEmails(formData) {
     const folder = formData.get('folder');
     const count = parseInt(formData.get('count')) || 5;
     const startOffset = parseInt(formData.get('start')) || 1;
-    const cleanMode = formData.get('cleanMode') === 'true'; // New option
+    const cleanMode = formData.get('cleanMode') === 'true';
 
     const client = new ImapFlow({
         host: 'imap.gmail.com', port: 993, secure: true,
@@ -20,7 +20,7 @@ export async function fetchEmails(formData) {
         let lock = await client.getMailboxLock(folder);
         const status = await client.status(folder, { messages: true });
         const total = status.messages;
-        const end = total - (startOffset - 1);
+        const end = Math.max(1, total - (startOffset - 1));
         const start = Math.max(1, end - (count - 1));
 
         const emails = [];
@@ -28,25 +28,28 @@ export async function fetchEmails(formData) {
             let source = msg.source.toString();
 
             if (cleanMode) {
-                // 1. Remove everything from Delivered-To until Return-Path (inclusive)
+                // 1. Remove block: Delivered-To, ARC-Seal, ARC-Message-Signature, ARC-Authentication-Results up to Return-Path
+                // This regex looks for Delivered-To and deletes everything until the end of the Return-Path line
                 source = source.replace(/Delivered-To:[\s\S]*?Return-Path:.*?\r?\n/i, '');
 
-                // 2. Remove specific security headers
-                source = source.replace(/Received-SPF:.*?\r?\n/gi, '');
-                source = source.replace(/Authentication-Results:.*?\r?\n/gi, '');
-                source = source.replace(/DKIM-Signature:[\s\S]*?(\r?\n(?![ \t]))/gi, '');
+                // 2. Remove specific security headers (handles folded/multi-line headers)
+                source = source.replace(/^Received-SPF:.*?\r?\n([ \t].*?\r?\n)*/gim, '');
+                source = source.replace(/^Authentication-Results:.*?\r?\n([ \t].*?\r?\n)*/gim, '');
+                source = source.replace(/^DKIM-Signature:.*?\r?\n([ \t].*?\r?\n)*/gim, '');
                 
-                // 3. Replace From domain with [P_RPATH]
-                source = source.replace(/From: (.*?)@.*?\r?\n/gi, 'From: $1@[P_RPATH]\r\n');
+                // 3. Keep 'Received:' (handled automatically as we don't delete it)
 
-                // 4. Replace To address with [*to]
-                source = source.replace(/To: .*?\r?\n/gi, 'To: [*to]\r\n');
+                // 4. From: Replace domain with [P_RPATH]
+                source = source.replace(/^From: (.*?)@.*?\r?\n/gim, 'From: $1@[P_RPATH]\r\n');
 
-                // 5. Replace Date with [*date]
-                source = source.replace(/Date: .*?\r?\n/gi, 'Date: [*date]\r\n');
+                // 5. To: Replace address with [*to]
+                source = source.replace(/^To: .*?\r?\n/gim, 'To: [*to]\r\n');
 
-                // 6. Add [EID] before @ in Message-ID
-                source = source.replace(/Message-ID: <(.*?)@(.*?)>/gi, 'Message-ID: <$1[EID]@$2>');
+                // 6. Date: Replace with [*date]
+                source = source.replace(/^Date: .*?\r?\n/gim, 'Date: [*date]\r\n');
+
+                // 7. Message-ID: Add [EID] before @
+                source = source.replace(/^Message-ID: <(.*?)@(.*?)>/gim, 'Message-ID: <$1[EID]@$2>');
             }
 
             emails.push({
